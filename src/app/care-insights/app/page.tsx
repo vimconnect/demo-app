@@ -142,6 +142,29 @@ function CareInsightsContent() {
       // Set up EHR subscriptions
       setupSubscriptions(sdk);
 
+      // ── Worker App integration (Phase 1) ─────────────────────────────────────
+      // Subscribe to workerState updates written by the offscreen Worker App.
+      // The Worker App writes patient summaries and event data via workerState.write().
+      if (typeof sdk.workerState?.on === 'function') {
+        sdk.workerState.on('last_event', (prev: any, curr: any) => {
+          if (curr != null) {
+            console.log('[care-insights] Worker App last event:', curr);
+          }
+        });
+      }
+
+      // Listen for app open to check if there's a launchPayload from a notification click.
+      if (typeof sdk.hub?.appState?.subscribe === 'function') {
+        sdk.hub.appState.subscribe('appOpenStatus', (status: any) => {
+          if (status.isAppOpen && typeof sdk.getLaunchContext === 'function') {
+            const ctx = sdk.getLaunchContext();
+            if (ctx != null) {
+              console.log('[care-insights] Opened via notification, launchPayload:', ctx);
+            }
+          }
+        });
+      }
+
       setSdkStatus('ready');
 
       // Hydrate encounter state collected by the offscreen worker while the app was closed.

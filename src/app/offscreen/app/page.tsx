@@ -2,107 +2,153 @@
 
 import { Suspense, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { initVimSDK, type EventType } from '@vimconnect/app-sdk';
+import { initWorkerVimSDK } from '@vimconnect/app-sdk';
+import type { WorkerSDK, ContextData } from '@vimconnect/app-sdk';
 
 /**
- * Offscreen App Page - Headless Background SDK Worker
+ * Offscreen Worker App Page — headless background SDK worker (Phase 1)
  *
- * This page is the OAuth callback target for the offscreen launch flow.
- * It runs silently in a hidden iframe managed by OffscreenAppManager.
+ * Loaded inside a hidden iframe managed by OffscreenAppManager.
+ * Uses VimSDK.initWorker() (WorkerSDK) to:
+ *   - Register for context events (patient, encounter) and write to workerState
+ *   - Register for workflow events and send push notifications
+ *   - Monitor hub.appState (whether the UI App is visible)
  *
- * Flow:
- * 1. Receives OAuth code + state from /offscreen/launch redirect
- * 2. Validates CSRF state from sessionStorage
- * 3. Exchanges code for access token via POST /api/auth/token
- * 4. Initialises VimSDK with the access token
- * 5. Subscribes to workflow events and logs them (no UI)
+ * Auth flow (mirrors the old offscreen/app pattern):
+ *   1. OAuth code + state arrive via query params
+ *   2. CSRF state validated from sessionStorage
+ *   3. Code exchanged for access token via /api/auth/token
+ *   4. VimSDK.initWorker({ accessToken }) called
  *
- * This page has no rendered UI — it returns null.
- * Useful for E2E testing: look for '[offscreen/app] SDK ready' in the console.
+ * This page renders no visible UI.
+ * Look for '[offscreen/worker]' console messages for E2E test verification.
  */
-function OffscreenAppContent() {
+function OffscreenWorkerContent() {
   const searchParams = useSearchParams();
   const initializedRef = useRef(false);
 
   useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
+    initWorker();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    async function initOffscreen() {
-      try {
-        const code = searchParams.get('code');
-        const stateParam = searchParams.get('state');
+  async function initWorker() {
+    try {
+      const code = searchParams.get('code');
+      const stateParam = searchParams.get('state');
 
-        if (!code || !stateParam) {
-          console.error('[offscreen/app] Missing OAuth parameters — was this page loaded directly?');
-          return;
-        }
-
-        // Validate CSRF state (stored by /offscreen/launch before redirect)
-        const stateParts = stateParam.split(':');
-        if (stateParts.length !== 2) {
-          console.error('[offscreen/app] Malformed state parameter');
-          return;
-        }
-        const [launchId, csrfToken] = stateParts;
-
-        // Note: sessionStorage is the standard browser-side CSRF pattern for OAuth flows.
-        // For production apps a BFF with httpOnly cookies should be used instead.
-        const flowKey = `oauth_state_${launchId}`;
-        const storedCsrf = sessionStorage.getItem(flowKey);
-        if (storedCsrf !== csrfToken) {
-          console.error('[offscreen/app] CSRF state mismatch — possible replay attack');
-          return;
-        }
-        sessionStorage.removeItem(flowKey);
-
-        // Exchange authorization code for access token
-        const tokenRes = await fetch('/api/auth/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code }),
-        });
-
-        if (!tokenRes.ok) {
-          console.error('[offscreen/app] Token exchange failed');
-          return;
-        }
-
-        const { access_token: accessToken } = await tokenRes.json().catch(() => ({}));
-
-        if (!accessToken) {
-          console.error('[offscreen/app] No access_token in response');
-          return;
-        }
-
-        // Initialise SDK — sends VIM_SDK_READY with the access token to the extension bridge
-        const sdk = await initVimSDK({ accessToken });
-        console.log('[offscreen/app] SDK ready');
-
-        // Subscribe to workflow events — log them for E2E test verification
-        const manifest = sdk.ehr.getManifest();
-        const supportedEvents = manifest?.supportedEvents ?? [];
-
-        for (const eventType of supportedEvents) {
-          sdk.ehr.workflow.on(eventType.id as EventType, (event) => {
-            console.log(`[offscreen/app] workflow event: ${eventType.id}`, event);
-          });
-        }
-      } catch (err) {
-        console.error('[offscreen/app] Init error:', err);
+      if (!code || !stateParam) {
+        console.error('[offscreen/worker] Missing OAuth parameters');
+        return;
       }
-    }
-    initOffscreen();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- intentional: runs once on mount; initializedRef guards against double-invocation
 
-  // No visible UI — runs silently in the background iframe
+      // CSRF validation
+      const stateParts = stateParam.split(':');
+      if (stateParts.length !== 2) {
+        console.error('[offscreen/worker] Malformed state parameter');
+        return;
+      }
+      const [launchId, csrfToken] = stateParts;
+      const flowKey = `oauth_state_${launchId}`;
+      const storedCsrf = sessionStorage.getItem(flowKey);
+      if (storedCsrf !== csrfToken) {
+        console.error('[offscreen/worker] CSRF state mismatch');
+        return;
+      }
+      sessionStorage.removeItem(flowKey);
+
+      // Exchange code for access token
+      const tokenRes = await fetch('/api/auth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+
+      if (!tokenRes.ok) {
+        console.error('[offscreen/worker] Token exchange failed');
+        return;
+      }
+
+      const { access_token: accessToken } = await tokenRes.json().catch(() => ({}));
+      if (!accessToken) {
+        console.error('[offscreen/worker] No access_token in response');
+        return;
+      }
+
+      // Initialise Worker SDK (uses VIM_SDK_READY + contextType='worker' handshake)
+      const sdk: WorkerSDK = await initWorkerVimSDK({ accessToken });
+      console.log('[offscreen/worker] Worker SDK ready');
+
+      // ── Monitor UI App open/close state ──────────────────────────────────────
+      sdk.hub.appState.subscribe('appOpenStatus', (status: { isAppOpen: boolean }) => {
+        console.log('[offscreen/worker] App open status changed:', status.isAppOpen);
+        sdk.workerState.write('appIsOpen', status.isAppOpen);
+      });
+
+      // ── Register for context changes ──────────────────────────────────────────
+      // Hardcode context keys — WorkerSDK does not expose getManifest().
+      const supportedContexts = [
+        { contextKey: 'patient-chart-opened:patient' },
+      ];
+
+      for (const ctx of supportedContexts) {
+        const { contextKey } = ctx;
+
+        sdk.ehr.context.register<ContextData>(
+          contextKey,
+          {
+            // Declare that we only need firstName and lastName fields
+            // Callback only fires when these fields change or are first available
+            fields: ['firstName', 'lastName', 'dateOfBirth'],
+            debounceMs: 200,
+          },
+          (prev, curr, handle) => {
+            if (curr == null) {
+              console.log(`[offscreen/worker] Context cleared: ${contextKey}`);
+              // Remove patient info from workerState when context closes
+              sdk.workerState.remove(`patient_${contextKey}`);
+              return;
+            }
+
+            console.log(`[offscreen/worker] Context changed: ${contextKey}`, curr?.fields);
+
+            // Write summary to workerState so the UI App can display it
+            sdk.workerState.write(`patient_${contextKey}`, {
+              id: curr?.id,
+              name: `${curr?.fields?.firstName ?? ''} ${curr?.fields?.lastName ?? ''}`.trim(),
+              dob: curr?.fields?.dateOfBirth ?? null,
+            });
+
+            // Send a push notification if notify operation is available
+            if (handle.hub != null) {
+              handle.hub.pushNotification.show({
+                text: `Patient context updated: ${curr?.fields?.firstName ?? 'Unknown'}`,
+                notificationId: `patient-update-${contextKey}`,
+                timeoutInSec: 8,
+                launchPayload: { contextKey, patientId: curr?.id },
+              }).catch((err) => console.error('[offscreen/worker] Notification failed:', err));
+            }
+          }
+        );
+
+        console.log(`[offscreen/worker] Registered context: ${contextKey}`);
+      }
+
+      console.log('[offscreen/worker] Worker SDK fully initialized');
+    } catch (err) {
+      console.error('[offscreen/worker] Init error:', err);
+    }
+  }
+
+  // No visible UI — runs silently in a hidden background iframe
   return null;
 }
 
-export default function OffscreenAppPage() {
+export default function OffscreenWorkerPage() {
   return (
     <Suspense fallback={null}>
-      <OffscreenAppContent />
+      <OffscreenWorkerContent />
     </Suspense>
   );
 }

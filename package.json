@@ -1,18 +1,28 @@
 {
   "name": "vim-sdk-demo-app",
   "version": "1.0.0",
-  "description": "OAuth-enabled demo app for Vim Connect SDK",
+  "description": "Reference implementation for building applications with the Vim Connect SDK",
+  "license": "MIT",
+  "homepage": "https://developer-docs.getvim.ai",
+  "keywords": [
+    "vim-connect",
+    "sdk",
+    "demo",
+    "nextjs",
+    "healthcare",
+    "ehr",
+    "ehr-integration"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "next dev -p 8080",
-    "dev:staging": "NEXT_PUBLIC_ENV=staging next dev -p 8080",
     "build": "next build",
-    "build:staging": "NEXT_PUBLIC_ENV=staging next build",
     "start": "next start -p 8080",
-    "start:staging": "NEXT_PUBLIC_ENV=staging next start -p 8080",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "3.1004.0",
     "next": "^16.1.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
@@ -23,5 +33,9 @@
     "@types/react": "^19.2.8",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.5.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vimconnect/demo-app.git"
   }
 }

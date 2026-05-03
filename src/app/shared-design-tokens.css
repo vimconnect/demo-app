@@ -16,6 +16,11 @@
   /* Hub circle selected background — solid teal for selected app circles in both modes */
   --color-hub-circle-selected: rgb(55, 145, 195);
 
+  /* Brand-loader dot tints — light desaturated variants of cyan/purple, used
+     for the staggered four-dot loader. Same in light and dark mode. */
+  --color-cyan-lightest:   #D6F1FA;
+  --color-purple-lightest: #C9CCFF;
+
   /* Cyan Opacity Variants - Single source of truth (RGB 108,205,239) */
   --color-cyan-03: rgba(108, 205, 239, 0.03);
   --color-cyan-05: rgba(108, 205, 239, 0.05);
