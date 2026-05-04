@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@vimconnect/app-sdk.svg)](https://www.npmjs.com/package/@vimconnect/app-sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A reference implementation showing how to build applications with the [Vim Connect SDK](https://developer-docs.getvim.ai). Built with Next.js, this demo covers OAuth authentication, real-time EHR context events, and the full SDK API surface.
+A reference implementation showing how to build applications with the [Vim Connect SDK](https://developer-docs.stage.getvim.ai). Built with Next.js, this demo covers OAuth authentication, real-time EHR context events, and the full SDK API surface.
 
 Use this as a starting point for building your own Vim Connect application.
 
@@ -11,8 +11,8 @@ Use this as a starting point for building your own Vim Connect application.
 
 ```bash
 # 1. Clone
-git clone https://github.com/vimconnect/demo-app.git
-cd demo-app
+git clone https://github.com/vimconnect/vim-demo-app.git
+cd vim-demo-app
 
 # 2. Install
 npm install
@@ -30,8 +30,9 @@ App runs at [http://localhost:8080](http://localhost:8080)
 ## Prerequisites
 
 - **Node.js** 18+
+- **Vim Connect Chrome extension** installed ([setup guide](https://developer-docs.stage.getvim.ai))
 - **Vim Connect account** with an OAuth application registered
-- **OAuth credentials** (client ID + client secret) from the [Vim developer portal](https://developer-docs.getvim.ai)
+- **OAuth credentials** (client ID + client secret) from the [Vim developer portal](https://developer-docs.stage.getvim.ai)
 
 ## Environment Variables
 
@@ -66,9 +67,9 @@ src/
 
 ## Documentation
 
-- [Vim Connect SDK Documentation](https://developer-docs.getvim.ai)
+- [Vim Connect SDK Documentation](https://developer-docs.stage.getvim.ai)
 - [`@vimconnect/app-sdk` on npm](https://www.npmjs.com/package/@vimconnect/app-sdk)
-- [OAuth Integration Guide](https://developer-docs.getvim.ai)
+- [OAuth Integration Guide](https://developer-docs.stage.getvim.ai)
 
 ## Scripts
 
