@@ -27,7 +27,7 @@
     "next": "^16.1.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "@vimconnect/app-sdk": "0.4.16"
+    "@vimconnect/app-sdk": "0.4.34"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
