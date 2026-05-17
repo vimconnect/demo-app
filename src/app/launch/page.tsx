@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getVimBackendUrl, getAppUrl } from '@/lib/sdk-config';
+import { ErrorScreen } from '@/components/ErrorScreen';
 
 /**
  * Landing Page - OAuth Flow Launcher
@@ -10,9 +11,15 @@ import { getVimBackendUrl, getAppUrl } from '@/lib/sdk-config';
  * This page receives the launch_id from the extension iframe URL
  * and immediately redirects to Vim's OAuth authorization endpoint
  */
+type LaunchErrorDetail = {
+  message: string;
+  timestamp: string;
+  userAgent: string;
+};
+
 function LaunchPageContent() {
   const searchParams = useSearchParams();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LaunchErrorDetail | null>(null);
 
   // Prevent duplicate redirects (React StrictMode runs effects twice)
   const redirectingRef = useRef(false);
@@ -29,7 +36,11 @@ function LaunchPageContent() {
     console.log('LandingPage: Starting OAuth flow', { launchId });
 
     if (!launchId) {
-      setError('Missing launch_id parameter. This app must be launched from Vim Connect extension.');
+      setError({
+        message: 'Missing launch_id parameter. This app must be launched from Vim Connect extension.',
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+      });
       return;
     }
 
@@ -37,7 +48,7 @@ function LaunchPageContent() {
     redirectingRef.current = true;
 
     // Generate CSRF state token (only once!)
-    // Use launch_id as the flow identifier to avoid conflicts between tabs
+    // Use launch_id as the flow identifier to avoid conflicts between tabs.
     const csrfToken = crypto.randomUUID();
     const flowKey = `oauth_state_${launchId}`;
     sessionStorage.setItem(flowKey, csrfToken);
@@ -71,26 +82,16 @@ function LaunchPageContent() {
 
   if (error) {
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: '100vh',
-        padding: '20px',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-      }}>
-        <div style={{
-          maxWidth: '500px',
-          padding: '24px',
-          border: '1px solid #fee',
-          borderRadius: '8px',
-          backgroundColor: '#fef2f2',
-          color: '#991b1b',
-        }}>
-          <h2 style={{ marginTop: 0 }}>Launch Error</h2>
-          <p>{error}</p>
-        </div>
-      </div>
+      <ErrorScreen
+        heading="Launch Error"
+        message="Something went wrong. Please reopen this app from the Vim Connect extension."
+        diagnostics={[
+          { label: 'Error:', value: error.message },
+          { label: 'Time:', value: error.timestamp },
+          { label: 'Browser:', value: error.userAgent },
+        ]}
+        diagnosticsPanelId="launch-error-diagnostics-panel"
+      />
     );
   }
 

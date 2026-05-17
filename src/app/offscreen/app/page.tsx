@@ -89,7 +89,7 @@ function OffscreenWorkerContent() {
       // ── Register for context changes ──────────────────────────────────────────
       // Hardcode context keys — WorkerSDK does not expose getManifest().
       const supportedContexts = [
-        { contextKey: 'patient-chart-opened:patient' },
+        { contextKey: 'chart_open:patient' },
       ];
 
       for (const ctx of supportedContexts) {

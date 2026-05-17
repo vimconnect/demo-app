@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { initVimSDK, type VimSDK, type AppManifest, type WorkflowEvent, type AppOpenStatus, type ContextKey, type ContextKeyEntityMap, type EventType } from "@vimconnect/app-sdk";
+import { ErrorScreen } from "@/components/ErrorScreen";
 
 type LogEntry = {
   timestamp: string;
@@ -10,12 +11,16 @@ type LogEntry = {
   type: "info" | "success" | "error";
 };
 
+type PermScopeMode = "all" | "prefix" | "specific";
+type FieldPermScope = { mode: PermScopeMode; token: string | null };
+
 type UpdaterInfo = {
   entityType: string;
   fieldPath: string;
   componentId: string;
   value: string;
   mode: "override" | "append";
+  permScope: FieldPermScope;
 };
 
 type EventPreview = {
@@ -42,6 +47,13 @@ type AppStateLogEntry = {
   trigger?: string;
 };
 
+type ErrorDetail = {
+  message: string;
+  code: string | undefined;
+  timestamp: string;
+  userAgent: string;
+};
+
 /**
  * Main App Page Content - OAuth Callback + Full SDK Demo
  */
@@ -50,7 +62,7 @@ function AppPageContent() {
   const [status, setStatus] = useState<"loading" | "connected" | "error">(
     "loading",
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorDetail | null>(null);
   const [vimSDK, setVimSDK] = useState<VimSDK | null>(null);
   const [manifest, setManifest] = useState<AppManifest | null>(null);
 
@@ -75,7 +87,6 @@ function AppPageContent() {
   const [detectedComponents, setDetectedComponents] = useState<
     Map<string, Set<string>>
   >(new Map());
-
   // Collapsible sections state
   const [sdkSubscriptionCollapsed, setSdkSubscriptionCollapsed] =
     useState(true);
@@ -145,14 +156,11 @@ function AppPageContent() {
       if (!launchId || !csrfToken) {
         throw new Error("Invalid state parameter format");
       }
-
       const flowKey = `oauth_state_${launchId}`;
       const storedToken = sessionStorage.getItem(flowKey);
-
       if (csrfToken !== storedToken) {
         throw new Error("CSRF validation failed");
       }
-
       sessionStorage.removeItem(flowKey);
 
       initializedRef.current = true;
@@ -176,7 +184,12 @@ function AppPageContent() {
       );
     } catch (err: any) {
       console.error("Initialization error:", err);
-      setError(err.message);
+      setError({
+        message: err.message ?? "Unknown error",
+        code: err.code,
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+      });
       setStatus("error");
       initializedRef.current = false;
     } finally {
@@ -540,6 +553,7 @@ function AppPageContent() {
         componentId,
         value: "",
         mode: "override",
+        permScope: { mode: "all", token: null },
       });
       addLog(`Enabled updater for ${fieldPath}`, "success");
     }
@@ -552,7 +566,7 @@ function AppPageContent() {
 
     try {
       addLog(
-        `Executing update: ${updaterInfo.entityType}.${updaterInfo.fieldPath} = "${updaterInfo.value}"  (${updaterInfo.mode})`,
+        `Executing update: ${updaterInfo.entityType}.${updaterInfo.fieldPath} = "${updaterInfo.value}" (${updaterInfo.mode})`,
         "info",
       );
 
@@ -562,13 +576,19 @@ function AppPageContent() {
         return;
       }
 
+      const permFields = getPermFieldsForUpdater(updaterInfo);
+      const permOptions = permFields ? { fields: permFields } : undefined;
+
       // Request permission if needed before updating
-      if (!namespace.hasPermission("update")) {
+      if (!namespace.hasPermission("update", permOptions)) {
+        const scopeLabel = permFields
+          ? ` [scope: ${permFields.join(", ")}]`
+          : " [scope: all fields]";
         addLog(
-          `Requesting permission for ${updaterInfo.entityType}...`,
+          `Requesting permission for ${updaterInfo.entityType}${scopeLabel}...`,
           "info",
         );
-        const permResult = await namespace.requestPermission("update");
+        const permResult = await namespace.requestPermission("update", permOptions);
         if (permResult !== "granted") {
           addLog(`Permission denied for ${updaterInfo.entityType}`, "error");
           return;
@@ -582,10 +602,9 @@ function AppPageContent() {
         // Not valid JSON — send as plain string
       }
 
-      const result = await namespace.update(
-        { [updaterInfo.fieldPath]: parsedValue },
-        { mode: updaterInfo.mode },
-      );
+      const data = buildNestedFromPath(updaterInfo.fieldPath, parsedValue);
+
+      const result = await namespace.update(data, { mode: updaterInfo.mode });
 
       if (result && result.success === false) {
         addLog(`Update failed: ${result.error || "Unknown error"}`, "error");
@@ -631,6 +650,50 @@ function AppPageContent() {
     });
   }
 
+  function updateUpdaterPermScope(
+    entityTypeKey: string,
+    key: string,
+    scope: FieldPermScope,
+  ) {
+    setActiveUpdaters((prev) => {
+      const newMap = new Map(prev);
+      if (newMap.has(entityTypeKey) && newMap.get(entityTypeKey)!.has(key)) {
+        const updater = newMap.get(entityTypeKey)!.get(key)!;
+        newMap.get(entityTypeKey)!.set(key, { ...updater, permScope: scope });
+      }
+      return newMap;
+    });
+  }
+
+  /** Returns parent prefix tokens for a single field path (e.g. 'subjective.chiefComplaintNotes' → ['subjective']) */
+  function getFieldParentPrefixes(fieldPath: string): string[] {
+    const parts = fieldPath.split(".");
+    const prefixes: string[] = [];
+    for (let i = 1; i < parts.length; i++) {
+      prefixes.push(parts.slice(0, i).join("."));
+    }
+    return prefixes;
+  }
+
+  /** Returns the fields array for permission calls based on the updater's own permScope */
+  function getPermFieldsForUpdater(updater: UpdaterInfo): string[] | undefined {
+    const { permScope } = updater;
+    if (!permScope || permScope.mode === "all") return undefined;
+    if (permScope.token) return [permScope.token];
+    return undefined;
+  }
+
+  /** Converts 'a.b.c' + value → { a: { b: { c: value } } } */
+  function buildNestedFromPath(
+    path: string,
+    value: unknown,
+  ): Record<string, unknown> {
+    return path.split(".").reduceRight<Record<string, unknown>>(
+      (acc, key) => ({ [key]: acc }),
+      value as any,
+    );
+  }
+
   if (status === "loading") {
     return (
       <div className="loading-container">
@@ -645,19 +708,28 @@ function AppPageContent() {
   }
 
   if (status === "error") {
+    /*
+     * UX split: show a friendly message for end users (providers/patients)
+     * who should never see raw SDK internals. Technical details live behind
+     * "Show Diagnostics" so developers can expand and copy them into bug
+     * reports. Copy this pattern in production apps — never surface raw SDK
+     * error messages directly to end users.
+     */
     return (
-      <div className="error-container">
-        <div className="error-content">
-          <h2>Connection Error</h2>
-          <p>{error}</p>
-          <button
-            onClick={() => window.location.reload()}
-            className="btn btn-danger"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
+      <ErrorScreen
+        heading="Connection Error"
+        message="Something went wrong. Press retry to reload the application."
+        diagnostics={[
+          { label: "Error:", value: error?.message ?? "Unknown error" },
+          { label: "Code:", value: error?.code ?? "N/A" },
+          { label: "Time:", value: error?.timestamp ?? "N/A" },
+          { label: "Browser:", value: error?.userAgent ?? "N/A" },
+        ]}
+        retry={{
+          label: "Retry",
+          onClick: () => window.location.reload(),
+        }}
+      />
     );
   }
 
@@ -1317,7 +1389,8 @@ function AppPageContent() {
                 <div className="demo-card-section">
                   <div className="demo-card-label">Update Controls</div>
                   {Array.from(activeUpdaters.entries()).map(
-                    ([entityTypeKey, updaterMap]) => (
+                    ([entityTypeKey, updaterMap]) => {
+                      return (
                       <div
                         key={entityTypeKey}
                         style={{ marginBottom: "var(--space-md)" }}
@@ -1330,10 +1403,14 @@ function AppPageContent() {
                         </div>
                         {Array.from(updaterMap.entries()).map(
                           ([key, updater]) => {
+                            const fieldPrefixes = getFieldParentPrefixes(updater.fieldPath);
+                            const currentScope = updater.permScope;
+                            const permFields = getPermFieldsForUpdater(updater);
+                            const capOptions = permFields ? { fields: permFields } : undefined;
                             const cap =
                               (vimSDK?.ehr?.context as any)?.[
                                 updater.entityType
-                              ]?.getCapability("update");
+                              ]?.getCapability("update", capOptions);
                             const detected = cap?.available ?? false;
                             return (
                               <div
@@ -1347,6 +1424,41 @@ function AppPageContent() {
                                       (not in context)
                                     </span>
                                   )}
+                                </div>
+                                {/* Per-field permission scope selector */}
+                                <div style={{ marginBottom: "var(--space-sm)", display: "flex", alignItems: "center", gap: "var(--space-sm)", flexWrap: "wrap" }}>
+                                  <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)" }}>
+                                    Perm scope:
+                                  </span>
+                                  <select
+                                    value={
+                                      currentScope.mode === "all"
+                                        ? "all"
+                                        : `${currentScope.mode}:${currentScope.token}`
+                                    }
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      if (val === "all") {
+                                        updateUpdaterPermScope(entityTypeKey, key, { mode: "all", token: null });
+                                      } else if (val.startsWith("prefix:")) {
+                                        updateUpdaterPermScope(entityTypeKey, key, { mode: "prefix", token: val.slice(7) });
+                                      } else if (val.startsWith("specific:")) {
+                                        updateUpdaterPermScope(entityTypeKey, key, { mode: "specific", token: val.slice(9) });
+                                      }
+                                    }}
+                                    className="input"
+                                    style={{ fontSize: "var(--text-xs)", padding: "2px 6px" }}
+                                  >
+                                    <option value="all">All fields</option>
+                                    {fieldPrefixes.map((prefix) => (
+                                      <option key={`prefix:${prefix}`} value={`prefix:${prefix}`}>
+                                        Prefix: {prefix}.*
+                                      </option>
+                                    ))}
+                                    <option value={`specific:${updater.fieldPath}`}>
+                                      Field: {updater.fieldPath}
+                                    </option>
+                                  </select>
                                 </div>
                                 <div className="input-group">
                                   <input
@@ -1395,7 +1507,8 @@ function AppPageContent() {
                           },
                         )}
                       </div>
-                    ),
+                      );
+                    }
                   )}
                 </div>
               )}
