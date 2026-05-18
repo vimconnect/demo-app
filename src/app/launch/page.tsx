@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getVimBackendUrl, getAppUrl } from '@/lib/sdk-config';
+import { getConfig } from '@/lib/client-config';
 import { ErrorScreen } from '@/components/ErrorScreen';
 
 /**
@@ -63,7 +64,7 @@ function LaunchPageContent() {
 
     // Build OAuth authorization URL
     const vimBackendUrl = getVimBackendUrl();
-    const clientId = process.env.NEXT_PUBLIC_CLIENT_ID;
+    const clientId = getConfig().clientId;
     const appUrl = getAppUrl();
 
     const authorizeUrl = new URL('/app-auth/authorize', vimBackendUrl);

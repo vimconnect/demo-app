@@ -6,6 +6,8 @@
  * All config is loaded into memory and validated before the server accepts requests.
  */
 
+import { VIM_BACKEND_URLS, APP_URLS } from './url-constants';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -61,7 +63,7 @@ class ConfigService {
     if (process.env.NEXT_PUBLIC_AUTH_BYPASS === 'true') {
       this.config = {
         env: 'staging',
-        clientId: process.env.NEXT_PUBLIC_CLIENT_ID || 'bypass-mode',
+        clientId: process.env.CLIENT_ID || 'bypass-mode',
         clientSecret: 'bypass-mode',
         vimBackendUrl: 'https://api.stage.getvim.ai',
         appUrl: '',
@@ -76,9 +78,9 @@ class ConfigService {
       console.log(`[config] Environment: ${env}`);
 
       // 2. Validate required env vars
-      const clientId = process.env.NEXT_PUBLIC_CLIENT_ID;
+      const clientId = process.env.CLIENT_ID;
       if (!clientId) {
-        throw new ConfigError('NEXT_PUBLIC_CLIENT_ID is required');
+        throw new ConfigError('CLIENT_ID is required');
       }
 
       // 3. Read CLIENT_SECRET (injected by App Runner from Secrets Manager)
@@ -125,17 +127,17 @@ class ConfigService {
   // ============================================================================
 
   private _validateEnvironment(): 'local' | 'staging' | 'production' {
-    const env = process.env.NEXT_PUBLIC_ENV;
+    const env = process.env.APP_ENV;
 
     if (!env) {
       throw new ConfigError(
-        'NEXT_PUBLIC_ENV is required. Set to: local, staging, or production'
+        'APP_ENV is required. Set to: local, staging, or production'
       );
     }
 
     if (!['local', 'staging', 'production'].includes(env)) {
       throw new ConfigError(
-        `NEXT_PUBLIC_ENV must be one of: local, staging, production. Got: ${env}`
+        `APP_ENV must be one of: local, staging, production. Got: ${env}`
       );
     }
 
@@ -159,40 +161,17 @@ class ConfigService {
   private _getVimBackendUrl(
     env: 'local' | 'staging' | 'production'
   ): string {
-    // Allow override
     if (process.env.NEXT_PUBLIC_VIM_BACKEND_URL) {
       return process.env.NEXT_PUBLIC_VIM_BACKEND_URL;
     }
-
-    switch (env) {
-      case 'local':
-        return 'http://localhost:3000';
-      case 'staging':
-        return 'https://api.stage.getvim.ai';
-      case 'production':
-        return 'https://api.getvim.ai';
-    }
+    return VIM_BACKEND_URLS[env];
   }
 
   private _getAppUrl(env: 'local' | 'staging' | 'production'): string {
-    // Allow override
     if (process.env.NEXT_PUBLIC_APP_URL) {
       return process.env.NEXT_PUBLIC_APP_URL;
     }
-
-    // Client-side: use current origin (but this runs server-side)
-    if (typeof window !== 'undefined') {
-      return window.location.origin;
-    }
-
-    switch (env) {
-      case 'local':
-        return 'http://localhost:8080';
-      case 'staging':
-        return 'http://localhost:8080'; // Override in deployed env
-      case 'production':
-        return 'https://demo.getvim.ai';
-    }
+    return APP_URLS[env];
   }
 }
 

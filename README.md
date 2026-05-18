@@ -38,7 +38,7 @@ App runs at [http://localhost:8080](http://localhost:8080)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `NEXT_PUBLIC_CLIENT_ID` | Yes | Your OAuth client ID |
+| `CLIENT_ID` | Yes | Your OAuth client ID |
 | `CLIENT_SECRET` | Yes | Your OAuth client secret (server-side only) |
 
 See [`.env.local.example`](.env.local.example) for details.

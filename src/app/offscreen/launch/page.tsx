@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getVimBackendUrl, getAppUrl } from '@/lib/sdk-config';
+import { getConfig } from '@/lib/client-config';
 
 /**
  * Offscreen Launch Page - OAuth Flow Initiator
@@ -38,7 +39,7 @@ function OffscreenLaunchContent() {
     const stateParam = `${launchId}:${csrfToken}`;
 
     const vimBackendUrl = getVimBackendUrl();
-    const clientId = process.env.NEXT_PUBLIC_CLIENT_ID;
+    const clientId = getConfig().clientId;
     const appUrl = getAppUrl();
 
     const authorizeUrl = new URL('/app-auth/authorize', vimBackendUrl);
