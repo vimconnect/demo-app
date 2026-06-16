@@ -93,7 +93,12 @@ function AppPageContent() {
   const [hubControlsCollapsed, setHubControlsCollapsed] = useState(true);
   const [eventPreviewCollapsed, setEventPreviewCollapsed] = useState(true);
   const [activeUpdatersCollapsed, setActiveUpdatersCollapsed] = useState(true);
+  const [apiWritesCollapsed, setApiWritesCollapsed] = useState(false);
   const [activityLogCollapsed, setActivityLogCollapsed] = useState(false); // Open by default
+
+  // API Writes (SDK ehr.api.*) state
+  const [cptEncounterId, setCptEncounterId] = useState("");
+  const [cptCode, setCptCode] = useState('[{"code":"77770"},{"code":"01234"}]');
 
   // Modal state
   const [manifestModalOpen, setManifestModalOpen] = useState(false);
@@ -559,6 +564,54 @@ function AppPageContent() {
     }
 
     setActiveUpdaters(newMap);
+  }
+
+  // SDK API write — uses the apiAutomation path (vimSDK.ehr.api.encounter.updateProcedureCodes)
+  // rather than the field-automation path used by executeUpdate. Routes through the
+  // kareo_tebra apiAutomation → update-encounter-procedure-codes automation → 5-step
+  // charge-capture chain → PUT /charge-capture-ui/api/Encounter/charges/{guid}.
+  async function executeUpdateProcedureCodes() {
+    if (!vimSDK) return;
+    const encounterId = cptEncounterId.trim();
+    const code = cptCode.trim();
+    if (!encounterId) {
+      addLog("Encounter ID is required for updateProcedureCodes", "error");
+      return;
+    }
+    if (!code) {
+      addLog("CPT code is required for updateProcedureCodes", "error");
+      return;
+    }
+    let procedureCodes: Array<{ code: string; description?: string }>;
+    if (code.startsWith("[")) {
+      try {
+        procedureCodes = JSON.parse(code);
+      } catch {
+        addLog("CPT code field looks like JSON but failed to parse", "error");
+        return;
+      }
+    } else {
+      procedureCodes = [{ code }];
+    }
+    try {
+      addLog(
+        `API call: ehr.api.encounter.updateProcedureCodes(${encounterId}, ${JSON.stringify(procedureCodes)})`,
+        "info",
+      );
+      const result = await (vimSDK.ehr.api as any).encounter.updateProcedureCodes(
+        { encounterId },
+        { billingInformation: { procedureCodes } },
+      );
+      if (result && (result as any).success === false) {
+        const r = result as any;
+        const detail = r.error ?? r.apiError ?? JSON.stringify(r).slice(0, 500);
+        addLog(`updateProcedureCodes failed: ${detail}`, "error");
+        return;
+      }
+      addLog(`updateProcedureCodes succeeded for encounter ${encounterId}`, "success");
+    } catch (err: any) {
+      addLog(`updateProcedureCodes threw: ${err.message}`, "error");
+    }
   }
 
   async function executeUpdate(updaterInfo: UpdaterInfo) {
@@ -1512,6 +1565,86 @@ function AppPageContent() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+
+        {/* API Writes (Write via SDK API) — apiAutomation path */}
+        <div className="section-collapsible">
+          <div
+            className="section-header"
+            onClick={() => setApiWritesCollapsed(!apiWritesCollapsed)}
+          >
+            <div
+              className="section-chevron"
+              style={{
+                transform: apiWritesCollapsed ? "rotate(0deg)" : "rotate(90deg)",
+              }}
+            >
+              ▶
+            </div>
+            <h2 className="section-title">API Writes (SDK ehr.api.*)</h2>
+          </div>
+          <div
+            className="section-content"
+            style={{ display: apiWritesCollapsed ? "none" : "block" }}
+          >
+            <div className="updater-card">
+              <div className="updater-card-header">
+                encounter.updateProcedureCodes (CPT)
+                <span
+                  style={{
+                    marginLeft: "var(--space-sm)",
+                    fontSize: "var(--text-xs)",
+                    fontWeight: 600,
+                    padding: "2px 6px",
+                    borderRadius: "var(--radius-sm, 4px)",
+                    background: "color-mix(in srgb, #9333ea 15%, transparent)",
+                    color: "#9333ea",
+                    border: "1px solid color-mix(in srgb, #9333ea 30%, transparent)",
+                    letterSpacing: "0.5px",
+                    fontFamily: "var(--font-mono, monospace)",
+                  }}
+                >
+                  UPDATE
+                </span>
+              </div>
+              <div
+                style={{
+                  marginBottom: "var(--space-sm)",
+                  fontSize: "var(--text-xs)",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                Calls vimSDK.ehr.api.encounter.updateProcedureCodes — the
+                active EHR's apiAutomation handles the call. Independent of
+                the user's current view.
+              </div>
+              <div className="input-group" style={{ marginBottom: "var(--space-sm)" }}>
+                <input
+                  type="text"
+                  value={cptEncounterId}
+                  onChange={(e) => setCptEncounterId(e.target.value)}
+                  placeholder="Encounter ID (required)"
+                  className="input"
+                />
+              </div>
+              <div className="input-group" style={{ marginBottom: "var(--space-sm)" }}>
+                <input
+                  type="text"
+                  value={cptCode}
+                  onChange={(e) => setCptCode(e.target.value)}
+                  placeholder='CPT code (e.g. 99213) or JSON array [{"code":"99213"}]'
+                  className="input"
+                />
+              </div>
+              <button
+                onClick={executeUpdateProcedureCodes}
+                className="btn btn-primary"
+                style={{ width: "100%" }}
+              >
+                Update Procedure Codes
+              </button>
             </div>
           </div>
         </div>
