@@ -4,6 +4,11 @@ import { Suspense, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { initWorkerVimSDK } from '@vimconnect/app-sdk';
 import type { WorkerSDK, ContextData } from '@vimconnect/app-sdk';
+import {
+  DEMO_WORKER_STATE_KEY,
+  REFRESH_DEMO_EVENT,
+  buildDemoWorkerData,
+} from '@/lib/worker-demo';
 
 /**
  * Offscreen Worker App Page — headless background SDK worker (Phase 1)
@@ -79,6 +84,34 @@ function OffscreenWorkerContent() {
       // Initialise Worker SDK (uses VIM_SDK_READY + contextType='worker' handshake)
       const sdk: WorkerSDK = await initWorkerVimSDK({ accessToken });
       console.log('[offscreen/worker] Worker SDK ready');
+
+      // ── Worker App → UI App round-trip demo (workerState + appEvents) ────────
+      // Seed mock state immediately so the UI App has something to render on
+      // open (workerState is subscribe-and-sync). A refreshCount closure lets
+      // each regeneration produce visibly-new data.
+      let demoRefreshCount = 0;
+      const writeDemoData = () => {
+        demoRefreshCount += 1;
+        const data = buildDemoWorkerData(demoRefreshCount);
+        sdk.workerState.write(DEMO_WORKER_STATE_KEY, data);
+        console.log('[offscreen/worker] workerState.write demoWorkerData', data);
+      };
+      writeDemoData();
+
+      // appEvents is capability-gated: present only when the host extension
+      // advertises it. Older extensions leave it undefined — degrade gracefully
+      // (initial state still syncs; the UI App's Refresh button becomes a no-op).
+      if (sdk.appEvents) {
+        sdk.appEvents.on(REFRESH_DEMO_EVENT, () => {
+          console.log('[offscreen/worker] appEvents received:', REFRESH_DEMO_EVENT, '→ regenerating');
+          writeDemoData();
+        });
+        console.log('[offscreen/worker] appEvents listener registered for', REFRESH_DEMO_EVENT);
+      } else {
+        console.warn(
+          '[offscreen/worker] appEvents NOT supported by this extension — Refresh button will be a no-op',
+        );
+      }
 
       // ── Monitor UI App open/close state ──────────────────────────────────────
       sdk.hub.appState.subscribe('appOpenStatus', (status: { isAppOpen: boolean }) => {

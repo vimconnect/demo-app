@@ -29,7 +29,7 @@
     "next": "^16.1.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "@vimconnect/app-sdk": "0.4.43"
+    "@vimconnect/app-sdk": "0.4.44"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

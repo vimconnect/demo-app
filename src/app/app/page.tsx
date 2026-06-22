@@ -4,6 +4,11 @@ import { Suspense, useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { initVimSDK, type VimSDK, type AppManifest, type WorkflowEvent, type AppOpenStatus, type ContextKey, type ContextKeyEntityMap, type EventType } from "@vimconnect/app-sdk";
 import { ErrorScreen } from "@/components/ErrorScreen";
+import {
+  DEMO_WORKER_STATE_KEY,
+  REFRESH_DEMO_EVENT,
+  type DemoWorkerData,
+} from "@/lib/worker-demo";
 
 type LogEntry = {
   timestamp: string;
@@ -121,6 +126,11 @@ function AppPageContent() {
 
   const appStateUnsubRef = useRef<(() => void) | null>(null);
 
+  // Worker App round-trip demo (workerState + appEvents)
+  const [workerData, setWorkerData] = useState<DemoWorkerData | null>(null);
+  const [appEventsSupported, setAppEventsSupported] = useState(false);
+  const workerStateUnsubRef = useRef<(() => void) | null>(null);
+
   // Prevent duplicate initialization
   const initializingRef = useRef(false);
   const initializedRef = useRef(false);
@@ -187,6 +197,35 @@ function AppPageContent() {
         `Manifest loaded: ${sdkManifest.supportedEvents?.length || 0} events, ${sdkManifest.supportedContexts?.length || 0} contexts`,
         "info",
       );
+
+      // ── Worker App round-trip demo ──────────────────────────────────────────
+      // Subscribe to the mock state the Worker App writes (subscribe-and-sync:
+      // fires immediately if the Worker already wrote it).
+      workerStateUnsubRef.current = sdk.workerState.on<DemoWorkerData>(
+        DEMO_WORKER_STATE_KEY,
+        (_prev, next) => {
+          setWorkerData(next);
+          if (next) {
+            addLog(
+              `workerState "${DEMO_WORKER_STATE_KEY}" → #${next.refreshCount} (${next.token})`,
+              "success",
+            );
+          } else {
+            addLog(`workerState "${DEMO_WORKER_STATE_KEY}" cleared`, "info");
+          }
+        },
+      );
+
+      // appEvents is capability-gated — present only when the extension
+      // advertises it. Feature-detect so older extensions degrade gracefully.
+      const supportsAppEvents = !!sdk.appEvents;
+      setAppEventsSupported(supportsAppEvents);
+      addLog(
+        supportsAppEvents
+          ? "appEvents supported — Refresh button is live"
+          : "appEvents NOT supported by this extension — Refresh disabled",
+        supportsAppEvents ? "info" : "error",
+      );
     } catch (err: any) {
       console.error("Initialization error:", err);
       setError({
@@ -199,6 +238,29 @@ function AppPageContent() {
       initializedRef.current = false;
     } finally {
       initializingRef.current = false;
+    }
+  }
+
+  // Clean up the workerState subscription on unmount
+  useEffect(() => {
+    return () => {
+      workerStateUnsubRef.current?.();
+      workerStateUnsubRef.current = null;
+    };
+  }, []);
+
+  // Worker App round-trip: ask the Worker to regenerate its mock state.
+  // Fire-and-forget — the new data arrives back via the workerState subscription.
+  function refreshWorkerData() {
+    if (!vimSDK?.appEvents) {
+      addLog("appEvents not supported by this extension", "error");
+      return;
+    }
+    try {
+      vimSDK.appEvents.send(REFRESH_DEMO_EVENT);
+      addLog(`Sent appEvent "${REFRESH_DEMO_EVENT}" → Worker`, "success");
+    } catch (err: any) {
+      addLog(`appEvents.send failed: ${err.message}`, "error");
     }
   }
 
@@ -570,6 +632,11 @@ function AppPageContent() {
   // rather than the field-automation path used by executeUpdate. Routes through the
   // kareo_tebra apiAutomation → update-encounter-procedure-codes automation → 5-step
   // charge-capture chain → PUT /charge-capture-ui/api/Encounter/charges/{guid}.
+  //
+  // The automation is marked isDisruptive: true, so the SDK requires a permission grant
+  // before the call. We use the ehr.api.* permission lifecycle (#4954): check current
+  // state via getCapability(), prompt the user via requestPermission() when needed,
+  // then invoke the method.
   async function executeUpdateProcedureCodes() {
     if (!vimSDK) return;
     const encounterId = cptEncounterId.trim();
@@ -593,12 +660,46 @@ function AppPageContent() {
     } else {
       procedureCodes = [{ code }];
     }
+
+    const encounterApi = (vimSDK.ehr.api as any).encounter;
+
+    // Permission lifecycle for the disruptive apiAutomation. Non-disruptive operations
+    // return permissionState: 'granted' here without prompting.
+    try {
+      const cap = encounterApi.getCapability("updateProcedureCodes");
+      if (!cap.available) {
+        addLog(
+          `updateProcedureCodes not available in this EHR (${cap.reason})`,
+          "error",
+        );
+        return;
+      }
+      if (cap.disruptive && cap.permissionState !== "granted") {
+        addLog(
+          "Requesting permission for updateProcedureCodes…",
+          "info",
+        );
+        const result = await encounterApi.requestPermission("updateProcedureCodes");
+        if (result !== "granted") {
+          addLog(
+            `Permission ${result} for updateProcedureCodes`,
+            "error",
+          );
+          return;
+        }
+        addLog("Permission granted — invoking updateProcedureCodes", "success");
+      }
+    } catch (err: any) {
+      addLog(`Permission flow threw: ${err.message}`, "error");
+      return;
+    }
+
     try {
       addLog(
         `API call: ehr.api.encounter.updateProcedureCodes(${encounterId}, ${JSON.stringify(procedureCodes)})`,
         "info",
       );
-      const result = await (vimSDK.ehr.api as any).encounter.updateProcedureCodes(
+      const result = await encounterApi.updateProcedureCodes(
         { encounterId },
         { billingInformation: { procedureCodes } },
       );
@@ -822,6 +923,92 @@ function AppPageContent() {
             className="btn-gradient"
           >
             View SDK Manifest
+          </button>
+        </div>
+
+        {/* Worker App Round-Trip (workerState + appEvents) */}
+        <div className="demo-card-section" style={{ marginBottom: "var(--space-2xl)" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: "var(--space-sm)",
+            }}
+          >
+            <div className="demo-card-label" style={{ marginBottom: 0 }}>
+              Worker App Round-Trip
+            </div>
+            <span
+              style={{
+                fontSize: "var(--text-xs)",
+                fontWeight: 600,
+                padding: "2px 8px",
+                borderRadius: "var(--radius-sm, 4px)",
+                fontFamily: "var(--font-mono, monospace)",
+                background: appEventsSupported
+                  ? "color-mix(in srgb, var(--color-success) 15%, transparent)"
+                  : "color-mix(in srgb, var(--color-text-muted) 15%, transparent)",
+                color: appEventsSupported
+                  ? "var(--color-success)"
+                  : "var(--color-text-muted)",
+              }}
+            >
+              appEvents {appEventsSupported ? "SUPPORTED" : "UNSUPPORTED"}
+            </span>
+          </div>
+          <div
+            style={{
+              fontSize: "var(--text-xs)",
+              color: "var(--color-text-muted)",
+              marginBottom: "var(--space-md)",
+            }}
+          >
+            Worker App writes mock data via <code>workerState</code>; this UI
+            subscribes to it. Refresh sends an <code>appEvents</code> message
+            back to the Worker, which regenerates the data and re-syncs it.
+          </div>
+          <div className="updater-card">
+            {workerData ? (
+              <>
+                <div style={{ marginBottom: "var(--space-xs)" }}>
+                  Refresh #: <strong>{workerData.refreshCount}</strong>
+                </div>
+                <div style={{ marginBottom: "var(--space-xs)" }}>
+                  Token: <code>{workerData.token}</code>
+                </div>
+                <div style={{ marginBottom: "var(--space-xs)" }}>
+                  Generated:{" "}
+                  <span style={{ color: "var(--color-text-muted)" }}>
+                    {new Date(workerData.generatedAt).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div style={{ color: "var(--color-text-muted)" }}>
+                  {workerData.message}
+                </div>
+              </>
+            ) : (
+              <div className="empty-state" style={{ margin: 0 }}>
+                Waiting for Worker App to sync data…
+              </div>
+            )}
+          </div>
+          <button
+            onClick={refreshWorkerData}
+            disabled={!appEventsSupported}
+            className="btn btn-primary"
+            style={{
+              width: "100%",
+              marginTop: "var(--space-md)",
+              opacity: appEventsSupported ? 1 : 0.5,
+            }}
+            title={
+              appEventsSupported
+                ? "Send appEvents → Worker regenerates data"
+                : "This extension does not support appEvents"
+            }
+          >
+            Refresh Worker Data
           </button>
         </div>
 
