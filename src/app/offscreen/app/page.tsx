@@ -4,6 +4,7 @@ import { Suspense, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { initWorkerVimSDK } from '@vimconnect/app-sdk';
 import type { WorkerSDK, ContextData } from '@vimconnect/app-sdk';
+import { getEnvironment } from '@/lib/sdk-config';
 import {
   DEMO_WORKER_STATE_KEY,
   REFRESH_DEMO_EVENT,
@@ -81,8 +82,16 @@ function OffscreenWorkerContent() {
         return;
       }
 
-      // Initialise Worker SDK (uses VIM_SDK_READY + contextType='worker' handshake)
-      const sdk: WorkerSDK = await initWorkerVimSDK({ accessToken });
+      // Initialise Worker SDK (uses VIM_SDK_READY + contextType='worker' handshake).
+      // Same runtime override as the UI page: only when THIS app is running in
+      // staging do we point the SDK at the staging core-sdk, so the staging worker
+      // surface exercises the workspace SDK too. `__overrideEnv` is runtime-only
+      // (not in the public type) → cast. Origin gate still applies (this page is
+      // served from the demo-app origin, which is whitelisted on staging).
+      const sdk: WorkerSDK = await initWorkerVimSDK({
+        accessToken,
+        ...(getEnvironment() === 'staging' ? { __overrideEnv: 'staging' } : {}),
+      } as Parameters<typeof initWorkerVimSDK>[0] & { __overrideEnv?: 'staging' });
       console.log('[offscreen/worker] Worker SDK ready');
 
       // ── Worker App → UI App round-trip demo (workerState + appEvents) ────────

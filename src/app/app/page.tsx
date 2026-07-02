@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { initVimSDK, type VimSDK, type AppManifest, type WorkflowEvent, type AppOpenStatus, type ContextKey, type ContextKeyEntityMap, type EventType } from "@vimconnect/app-sdk";
 import { ErrorScreen } from "@/components/ErrorScreen";
+import { getEnvironment } from "@/lib/sdk-config";
 import {
   DEMO_WORKER_STATE_KEY,
   REFRESH_DEMO_EVENT,
@@ -180,10 +181,15 @@ function AppPageContent() {
 
       initializedRef.current = true;
 
-      // Initialize SDK via npm import (typed)
+      // Initialize SDK via workspace import (typed). Build-once, run-anywhere:
+      // the core-sdk host is decided at runtime by origin. We only nudge the SDK
+      // to the staging host when THIS app is itself running in staging, so the
+      // staging deploy actually exercises the workspace SDK. `__overrideEnv` is a
+      // runtime-only param (not in the public SDKInitOptions type) — hence the cast.
       const sdk = await initVimSDK({
         debug: true,
-      });
+        ...(getEnvironment() === "staging" ? { __overrideEnv: "staging" } : {}),
+      } as Parameters<typeof initVimSDK>[0] & { __overrideEnv?: "staging" });
 
       setVimSDK(sdk);
       setStatus("connected");
