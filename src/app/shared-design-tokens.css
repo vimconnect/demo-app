@@ -58,6 +58,11 @@
   --color-error-15: rgba(239, 68, 68, 0.15);
   --color-error-30: rgba(239, 68, 68, 0.30);
 
+  /* Warning (Amber) Opacity Variants - Single source of truth (RGB 245,158,11) */
+  --color-warning-08: rgba(245, 158, 11, 0.08);
+  --color-warning-15: rgba(245, 158, 11, 0.15);
+  --color-warning-30: rgba(245, 158, 11, 0.30);
+
   /* Neutral Colors */
   --color-bg-primary: #030812;
   --color-bg-secondary: #061020;

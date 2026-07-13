@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { initVimSDK, type VimSDK, type AppManifest, type WorkflowEvent, type AppOpenStatus, type ContextKey, type ContextKeyEntityMap, type EventType } from "@vimconnect/app-sdk";
 import { ErrorScreen } from "@/components/ErrorScreen";
+import { CapabilityAutoRunner } from "@/components/CapabilityAutoRunner";
 import { getEnvironment } from "@/lib/sdk-config";
 import {
   DEMO_WORKER_STATE_KEY,
@@ -71,6 +72,9 @@ function AppPageContent() {
   const [error, setError] = useState<ErrorDetail | null>(null);
   const [vimSDK, setVimSDK] = useState<VimSDK | null>(null);
   const [manifest, setManifest] = useState<AppManifest | null>(null);
+  // Which experience is shown once connected — the classic demo or the
+  // SDK Capability Auto-Runner. Both share this one initialized SDK session.
+  const [view, setView] = useState<"classic" | "explorer">("classic");
 
   // Activity Log
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -85,6 +89,9 @@ function AppPageContent() {
   const contextUnsubscribeRefs = useRef<Map<string, () => void>>(new Map());
   const [eventPreviews, setEventPreviews] = useState<EventPreview[]>([]);
   const [contextChanges, setContextChanges] = useState<ContextChange[]>([]);
+  // Patient currently in EHR context — used to auto-fill API Reads id inputs so
+  // the read ops run against the detected patient without manual entry.
+  const [contextPatientId, setContextPatientId] = useState<string | null>(null);
 
   // Updaters (Write to EHR)
   const [activeUpdaters, setActiveUpdaters] = useState<
@@ -99,12 +106,27 @@ function AppPageContent() {
   const [hubControlsCollapsed, setHubControlsCollapsed] = useState(true);
   const [eventPreviewCollapsed, setEventPreviewCollapsed] = useState(true);
   const [activeUpdatersCollapsed, setActiveUpdatersCollapsed] = useState(true);
-  const [apiWritesCollapsed, setApiWritesCollapsed] = useState(false);
+  const [apiWritesCollapsed, setApiWritesCollapsed] = useState(true);
+  const [apiReadsCollapsed, setApiReadsCollapsed] = useState(true);
   const [activityLogCollapsed, setActivityLogCollapsed] = useState(false); // Open by default
 
   // API Writes (SDK ehr.api.*) state
   const [cptEncounterId, setCptEncounterId] = useState("");
   const [cptCode, setCptCode] = useState('[{"code":"77770"},{"code":"01234"}]');
+
+  // API Reads (SDK ehr.api.* getById/search) state.
+  // Per-operation parameter inputs, keyed by `${sdkNamespace}.${sdkMethod}.${paramName}`
+  // (and `.query` for search ops). Latest response per op, keyed by `${ns}.${method}`.
+  const [readOpInputs, setReadOpInputs] = useState<Record<string, string>>({});
+  const [readOpResults, setReadOpResults] = useState<Record<string, string>>(
+    {},
+  );
+  // Per-op "in flight" flag + last-run timestamp, so a repeat Run is visible
+  // even when the response is byte-identical to the previous one.
+  const [readOpRunning, setReadOpRunning] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [readOpRanAt, setReadOpRanAt] = useState<Record<string, string>>({});
 
   // Modal state
   const [manifestModalOpen, setManifestModalOpen] = useState(false);
@@ -126,6 +148,9 @@ function AppPageContent() {
   const [appStateLog, setAppStateLog] = useState<AppStateLogEntry[]>([]);
 
   const appStateUnsubRef = useRef<(() => void) | null>(null);
+  // Latest patient id seen per patient-context key, so closing one context
+  // clears the id only when no other context still holds a patient.
+  const patientIdByContextRef = useRef<Map<string, string | null>>(new Map());
 
   // Worker App round-trip demo (workerState + appEvents)
   const [workerData, setWorkerData] = useState<DemoWorkerData | null>(null);
@@ -135,6 +160,7 @@ function AppPageContent() {
   // Prevent duplicate initialization
   const initializingRef = useRef(false);
   const initializedRef = useRef(false);
+  const subscribedAllRef = useRef(false);
 
   useEffect(() => {
     if (initializedRef.current || initializingRef.current) {
@@ -143,6 +169,28 @@ function AppPageContent() {
     initializingRef.current = true;
     initializeApp();
   }, []);
+
+  // Subscribe to every supported workflow event + context by default, once the
+  // SDK and manifest are ready. Subscribes directly via the shared helpers and
+  // sets the full sets once — we don't loop the stateful toggles here, since
+  // each toggle would compute its next set from the same empty snapshot.
+  useEffect(() => {
+    if (!vimSDK || !manifest || subscribedAllRef.current) return;
+    subscribedAllRef.current = true;
+
+    const eventIds: string[] = (manifest.supportedEvents ?? [])
+      .map((e: any) => e.id)
+      .filter(Boolean);
+    const ctxKeys: string[] = (manifest.supportedContexts ?? [])
+      .map((c: any) => c.contextKey ?? c.key)
+      .filter(Boolean);
+
+    eventIds.forEach((id) => subscribeToWorkflowEvent(id));
+    const subscribedCtxKeys = ctxKeys.filter((k) => subscribeToContext(k));
+
+    setSubscribedWorkflowEvents(new Set(eventIds));
+    setSubscribedContexts(new Set(subscribedCtxKeys));
+  }, [vimSDK, manifest]);
 
   function addLog(
     message: string,
@@ -203,6 +251,47 @@ function AppPageContent() {
         `Manifest loaded: ${sdkManifest.supportedEvents?.length || 0} events, ${sdkManifest.supportedContexts?.length || 0} contexts`,
         "info",
       );
+
+      // Always-on subscription to every supported context so API Reads can
+      // default its id inputs to the patient currently in the EHR. The context
+      // payload carries the entity under `.fields` (ContextData), so a patient
+      // id is fields.identifiers.id. We subscribe to all contexts (not just
+      // entityType 'patient') because patient info can ride along other events,
+      // and extract the id defensively across a couple of known shapes.
+      const allContextKeys = (sdkManifest.supportedContexts ?? []).map(
+        (ctx: any) => ctx.contextKey,
+      );
+      for (const contextKey of new Set(allContextKeys)) {
+        try {
+          sdk.ehr.context.onChange(
+            contextKey as ContextKey,
+            (_prev: any, current: any) => {
+              // Only patient-type contexts carry a patient id; ignore others
+              // (e.g. encounter_open:encounter carries an encounter id).
+              if (current && current.type !== "patient") return;
+              // Patient id sits at the top level (current.id / identifier.id).
+              // `current` is undefined when the patient leaves context (chart
+              // closed) → id becomes null, clearing this context's entry.
+              const id =
+                current?.id ??
+                current?.identifier?.id ??
+                current?.fields?.identifiers?.id ??
+                null;
+              patientIdByContextRef.current.set(
+                contextKey,
+                id != null ? String(id) : null,
+              );
+              // Reflect the first context that still holds a patient, else null.
+              const active =
+                [...patientIdByContextRef.current.values()].find((v) => v) ??
+                null;
+              setContextPatientId(active);
+            },
+          );
+        } catch {
+          // Context not subscribable in this session — skip silently.
+        }
+      }
 
       // ── Worker App round-trip demo ──────────────────────────────────────────
       // Subscribe to the mock state the Worker App writes (subscribe-and-sync:
@@ -502,52 +591,44 @@ function AppPageContent() {
   }
 
   // Event Subscription Functions
-  function toggleWorkflowEvent(eventId: string) {
+  // SDK-subscribe side effects, shared by the toggles and the auto-subscribe
+  // effect. These only touch the SDK / unsubscribe refs — they never mutate the
+  // subscribed-* sets, so callers own that state and can batch it.
+  function subscribeToWorkflowEvent(eventId: string) {
     if (!vimSDK) return;
+    vimSDK.ehr.workflow.on(eventId as EventType, (event: WorkflowEvent) => {
+      addLog(`Workflow event: ${event.type}`, "success");
+      setEventPreviews((prev) => [
+        {
+          id: eventId,
+          timestamp: new Date().toISOString(),
+          type: event.type,
+          data: event as unknown as Record<string, unknown>,
+          streamType: "workflow",
+        },
+        ...prev,
+      ]);
 
-    const newSet = new Set(subscribedWorkflowEvents);
-    if (newSet.has(eventId)) {
-      newSet.delete(eventId);
-      addLog(`Unsubscribed from ${eventId}`, "info");
-    } else {
-      newSet.add(eventId);
-      vimSDK.ehr.workflow.on(eventId as EventType, (event: WorkflowEvent) => {
-        addLog(`Workflow event: ${event.type}`, "success");
-        setEventPreviews((prev) => [
-          {
-            id: eventId,
-            timestamp: new Date().toISOString(),
-            type: event.type,
-            data: event as unknown as Record<string, unknown>,
-            streamType: "workflow",
-          },
-          ...prev,
-        ]);
-
-        // Mark component as detected
-        const componentId = event.metadata?.componentId;
-        if (componentId) {
-          setDetectedComponents((prev) => {
-            const newMap = new Map(prev);
-            if (!newMap.has(eventId)) {
-              newMap.set(eventId, new Set());
-            }
-            newMap.get(eventId)!.add(componentId);
-            return newMap;
-          });
-          addLog(
-            `Component detected: ${componentId} for ${eventId}`,
-            "success",
-          );
-        }
-      });
-      addLog(`Subscribed to ${eventId}`, "success");
-    }
-    setSubscribedWorkflowEvents(newSet);
+      // Mark component as detected
+      const componentId = event.metadata?.componentId;
+      if (componentId) {
+        setDetectedComponents((prev) => {
+          const newMap = new Map(prev);
+          if (!newMap.has(eventId)) {
+            newMap.set(eventId, new Set());
+          }
+          newMap.get(eventId)!.add(componentId);
+          return newMap;
+        });
+        addLog(`Component detected: ${componentId} for ${eventId}`, "success");
+      }
+    });
   }
 
-  function toggleContextEvent(contextKey: string) {
-    if (!vimSDK) return;
+  // Returns true if the subscription was established (false on invalid key or
+  // SDK error), so callers know whether to track it in subscribedContexts.
+  function subscribeToContext(contextKey: string): boolean {
+    if (!vimSDK) return false;
 
     // Validate context key
     if (
@@ -557,8 +638,58 @@ function AppPageContent() {
     ) {
       addLog(`Invalid context key: ${contextKey}`, "error");
       console.error("Invalid context key:", contextKey);
-      return;
+      return false;
     }
+
+    try {
+      const unsubscribe = vimSDK.ehr.context.onChange(
+        contextKey as ContextKey,
+        (previousData, currentData) => {
+          const changeType =
+            !previousData && currentData
+              ? "opened"
+              : previousData && currentData
+                ? "changed"
+                : "closed";
+          addLog(`Context ${changeType}: ${contextKey}`, "success");
+          setContextChanges((prev) => [
+            {
+              contextKey,
+              timestamp: new Date().toISOString(),
+              changeType,
+              previousData,
+              currentData,
+            },
+            ...prev,
+          ]);
+        },
+      );
+      contextUnsubscribeRefs.current.set(contextKey, unsubscribe);
+      addLog(`Subscribed to context ${contextKey}`, "success");
+      return true;
+    } catch (err: any) {
+      addLog(`Failed to subscribe to context: ${err.message}`, "error");
+      return false;
+    }
+  }
+
+  function toggleWorkflowEvent(eventId: string) {
+    if (!vimSDK) return;
+
+    const newSet = new Set(subscribedWorkflowEvents);
+    if (newSet.has(eventId)) {
+      newSet.delete(eventId);
+      addLog(`Unsubscribed from ${eventId}`, "info");
+    } else {
+      newSet.add(eventId);
+      subscribeToWorkflowEvent(eventId);
+      addLog(`Subscribed to ${eventId}`, "success");
+    }
+    setSubscribedWorkflowEvents(newSet);
+  }
+
+  function toggleContextEvent(contextKey: string) {
+    if (!vimSDK) return;
 
     const newSet = new Set(subscribedContexts);
     if (newSet.has(contextKey)) {
@@ -566,39 +697,11 @@ function AppPageContent() {
       contextUnsubscribeRefs.current.get(contextKey)?.();
       contextUnsubscribeRefs.current.delete(contextKey);
       addLog(`Unsubscribed from context ${contextKey}`, "info");
-    } else {
+      setSubscribedContexts(newSet);
+    } else if (subscribeToContext(contextKey)) {
       newSet.add(contextKey);
-      try {
-        const unsubscribe = vimSDK.ehr.context.onChange(
-          contextKey as ContextKey,
-          (previousData, currentData) => {
-            const changeType =
-              !previousData && currentData
-                ? "opened"
-                : previousData && currentData
-                  ? "changed"
-                  : "closed";
-            addLog(`Context ${changeType}: ${contextKey}`, "success");
-            setContextChanges((prev) => [
-              {
-                contextKey,
-                timestamp: new Date().toISOString(),
-                changeType,
-                previousData,
-                currentData,
-              },
-              ...prev,
-            ]);
-          },
-        );
-        contextUnsubscribeRefs.current.set(contextKey, unsubscribe);
-        addLog(`Subscribed to context ${contextKey}`, "success");
-      } catch (err: any) {
-        addLog(`Failed to subscribe to context: ${err.message}`, "error");
-        newSet.delete(contextKey);
-      }
+      setSubscribedContexts(newSet);
     }
-    setSubscribedContexts(newSet);
   }
 
   // Updater Functions (Write to EHR)
@@ -718,6 +821,66 @@ function AppPageContent() {
       addLog(`updateProcedureCodes succeeded for encounter ${encounterId}`, "success");
     } catch (err: any) {
       addLog(`updateProcedureCodes threw: ${err.message}`, "error");
+    }
+  }
+
+  // SDK API read — catalog-based getById/search operations (non-disruptive, so
+  // no permission lifecycle). Data-driven from manifest.operations, so this lists
+  // whatever read ops the active EHR's collection exposes (e.g. patient.getPatient,
+  // patient.getInsurances, patient.getProblems). getById ops send the ids declared
+  // in metadata.idParameterNames; ops with zero id params ("Parameters: 0" in
+  // Studio) resolve the entity from the current EHR context, so we send {}.
+  async function executeReadOperation(op: any) {
+    if (!vimSDK) return;
+    const opKey = `${op.sdkNamespace}.${op.sdkMethod}`;
+    const namespace = (vimSDK.ehr.api as any)[op.sdkNamespace];
+    if (!namespace || typeof namespace[op.sdkMethod] !== "function") {
+      addLog(`ehr.api.${opKey} is not available on this SDK`, "error");
+      return;
+    }
+
+    // Build the argument object from the per-op inputs.
+    let callArg: any;
+    if (op.operationType === "search") {
+      callArg = { query: readOpInputs[`${opKey}.query`]?.trim() || undefined };
+    } else {
+      const idParams: string[] = op.metadata?.idParameterNames ?? [];
+      const ids: Record<string, string> = {};
+      for (const p of idParams) {
+        // Explicit input wins; otherwise fall back to the in-context patient id
+        // for patient-namespace ops so the read runs against the detected patient.
+        const typed = readOpInputs[`${opKey}.${p}`]?.trim();
+        const fallback = op.sdkNamespace === "patient" ? contextPatientId : null;
+        const v = typed || fallback || "";
+        if (v) ids[p] = v;
+      }
+      callArg = ids;
+    }
+
+    setReadOpRunning((prev) => ({ ...prev, [opKey]: true }));
+    try {
+      addLog(`API call: ehr.api.${opKey}(${JSON.stringify(callArg)})`, "info");
+      const result = await namespace[op.sdkMethod](callArg);
+      const pretty = JSON.stringify(result, null, 2);
+      setReadOpResults((prev) => ({ ...prev, [opKey]: pretty }));
+      if (result && (result as any).success === false) {
+        const r = result as any;
+        const detail = r.error ?? r.apiError ?? pretty.slice(0, 500);
+        addLog(`${opKey} returned success:false — ${detail}`, "error");
+      } else {
+        addLog(`${opKey} succeeded`, "success");
+      }
+    } catch (err: any) {
+      setReadOpResults((prev) => ({ ...prev, [opKey]: `Error: ${err.message}` }));
+      addLog(`${opKey} threw: ${err.message}`, "error");
+    } finally {
+      // Stamp the run time (changes every run → visible even if result is
+      // identical) and clear the in-flight flag.
+      setReadOpRanAt((prev) => ({
+        ...prev,
+        [opKey]: new Date().toLocaleTimeString(),
+      }));
+      setReadOpRunning((prev) => ({ ...prev, [opKey]: false }));
     }
   }
 
@@ -907,18 +1070,41 @@ function AppPageContent() {
       })),
   );
 
-  return (
+  // Read-side API operations exposed by the active EHR's catalog. getById/search
+  // are the non-disruptive reads (updateById/create are writes, handled above).
+  const readOps = (manifest?.operations ?? []).filter(
+    (op: any) =>
+      op.available &&
+      (op.operationType === "getById" || op.operationType === "search"),
+  );
+
+  return view === "explorer" && vimSDK && manifest ? (
+    <CapabilityAutoRunner
+      sdk={vimSDK}
+      manifest={manifest}
+      onSwitchMode={() => setView("classic")}
+    />
+  ) : (
     <div className="demo-container">
       {/* Header */}
       <div className="demo-header">
-        <h1>Vim Connect Demo App</h1>
-        <p className="demo-header-subtitle">
-          Connected via OAuth • SDK Version: {manifest?.version || "Unknown"}
-        </p>
-        <div className="status-badge">
-          <div className="status-dot" />
-          <span>Connected</span>
+        <div className="demo-header-text">
+          <h1>Vim Connect Demo App</h1>
+          <p className="demo-header-subtitle">
+            Connected via OAuth • SDK Version: {manifest?.version || "Unknown"}
+          </p>
+          <div className="status-badge">
+            <div className="status-dot" />
+            <span>Connected</span>
+          </div>
         </div>
+        <button
+          type="button"
+          className="btn btn-gradient btn-sm"
+          onClick={() => setView("explorer")}
+        >
+          ⚡ Auto-Runner
+        </button>
       </div>
 
       <div className="demo-content">
@@ -1839,6 +2025,191 @@ function AppPageContent() {
                 Update Procedure Codes
               </button>
             </div>
+          </div>
+        </div>
+
+        {/* API Reads (Read via SDK API) — catalog getById/search, data-driven */}
+        <div className="section-collapsible">
+          <div
+            className="section-header"
+            onClick={() => setApiReadsCollapsed(!apiReadsCollapsed)}
+          >
+            <div
+              className="section-chevron"
+              style={{
+                transform: apiReadsCollapsed ? "rotate(0deg)" : "rotate(90deg)",
+              }}
+            >
+              ▶
+            </div>
+            <h2 className="section-title">API Reads (SDK ehr.api.*)</h2>
+          </div>
+          <div
+            className="section-content"
+            style={{ display: apiReadsCollapsed ? "none" : "block" }}
+          >
+            {readOps.length === 0 ? (
+              <div
+                style={{
+                  fontSize: "var(--text-sm)",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                No read operations (getById / search) are available in this
+                EHR&apos;s collection.
+              </div>
+            ) : (
+              readOps.map((op: any) => {
+                const opKey = `${op.sdkNamespace}.${op.sdkMethod}`;
+                const idParams: string[] =
+                  op.operationType === "getById"
+                    ? (op.metadata?.idParameterNames ?? [])
+                    : [];
+                const result = readOpResults[opKey];
+                return (
+                  <div className="updater-card" key={opKey}>
+                    <div className="updater-card-header">
+                      ehr.api.{opKey}
+                      <span
+                        style={{
+                          marginLeft: "var(--space-sm)",
+                          fontSize: "var(--text-xs)",
+                          fontWeight: 600,
+                          padding: "2px 6px",
+                          borderRadius: "var(--radius-sm, 4px)",
+                          background:
+                            "color-mix(in srgb, #0891b2 15%, transparent)",
+                          color: "#0891b2",
+                          border:
+                            "1px solid color-mix(in srgb, #0891b2 30%, transparent)",
+                          letterSpacing: "0.5px",
+                          fontFamily: "var(--font-mono, monospace)",
+                        }}
+                      >
+                        {op.operationType === "search" ? "SEARCH" : "GET"}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        marginBottom: "var(--space-sm)",
+                        fontSize: "var(--text-xs)",
+                        color: "var(--color-text-muted)",
+                      }}
+                    >
+                      {op.sdkSignature ?? `Catalog entry: ${op.catalogEntryId}`}
+                    </div>
+
+                    {/* getById id parameters — prefilled with the patient in
+                        context, but editable so any id can be queried. */}
+                    {idParams.map((param) => {
+                      const key = `${opKey}.${param}`;
+                      const ctxDefault =
+                        op.sdkNamespace === "patient"
+                          ? (contextPatientId ?? "")
+                          : "";
+                      // Explicit input wins; otherwise show the context patient id.
+                      const value = readOpInputs[key] ?? ctxDefault;
+                      const showingContextDefault =
+                        ctxDefault !== "" && readOpInputs[key] === undefined;
+                      return (
+                        <div
+                          className="input-group"
+                          style={{ marginBottom: "var(--space-xs)" }}
+                          key={param}
+                        >
+                          <input
+                            type="text"
+                            value={value}
+                            onChange={(e) =>
+                              setReadOpInputs((prev) => ({
+                                ...prev,
+                                [key]: e.target.value,
+                              }))
+                            }
+                            placeholder={`${param} (required)`}
+                            className="input"
+                          />
+                          {showingContextDefault && (
+                            <div
+                              style={{
+                                marginTop: "2px",
+                                fontSize: "var(--text-xs)",
+                                color: "var(--color-text-muted)",
+                              }}
+                            >
+                              Auto-filled from patient in context — editable
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* search query */}
+                    {op.operationType === "search" && (
+                      <div
+                        className="input-group"
+                        style={{ marginBottom: "var(--space-sm)" }}
+                      >
+                        <input
+                          type="text"
+                          value={readOpInputs[`${opKey}.query`] ?? ""}
+                          onChange={(e) =>
+                            setReadOpInputs((prev) => ({
+                              ...prev,
+                              [`${opKey}.query`]: e.target.value,
+                            }))
+                          }
+                          placeholder="Search query (optional)"
+                          className="input"
+                        />
+                      </div>
+                    )}
+
+                    <button
+                      onClick={() => executeReadOperation(op)}
+                      className="btn btn-primary"
+                      style={{ width: "100%" }}
+                      disabled={readOpRunning[opKey]}
+                    >
+                      {readOpRunning[opKey]
+                        ? "Running…"
+                        : `Run ${op.sdkMethod}`}
+                    </button>
+
+                    {readOpRanAt[opKey] && (
+                      <div
+                        style={{
+                          marginTop: "var(--space-xs)",
+                          fontSize: "var(--text-xs)",
+                          color: "var(--color-text-muted)",
+                        }}
+                      >
+                        Last run: {readOpRanAt[opKey]}
+                      </div>
+                    )}
+
+                    {result != null && (
+                      <pre
+                        style={{
+                          marginTop: "var(--space-sm)",
+                          padding: "var(--space-sm)",
+                          background: "var(--color-surface-alt, #f4f4f5)",
+                          borderRadius: "var(--radius-sm, 4px)",
+                          fontSize: "var(--text-xs)",
+                          fontFamily: "var(--font-mono, monospace)",
+                          maxHeight: "260px",
+                          overflow: "auto",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {result}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
 

@@ -58,7 +58,7 @@ src/
 ├── app/
 │   ├── launch/page.tsx        # OAuth launcher (generates CSRF state, redirects)
 │   ├── app/page.tsx           # Main app (OAuth callback + SDK demo)
-│   ├── api/auth/token/route.ts  # Server-side token exchange
+│   ├── token/route.ts  # Server-side token exchange
 │   └── layout.tsx             # SDK script loading
 └── lib/
     ├── config.ts              # Environment configuration

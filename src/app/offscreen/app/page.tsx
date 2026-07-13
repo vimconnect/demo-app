@@ -23,7 +23,7 @@ import {
  * Auth flow (mirrors the old offscreen/app pattern):
  *   1. OAuth code + state arrive via query params
  *   2. CSRF state validated from sessionStorage
- *   3. Code exchanged for access token via /api/auth/token
+ *   3. Code exchanged for access token via /token
  *   4. VimSDK.initWorker({ accessToken }) called
  *
  * This page renders no visible UI.
@@ -65,7 +65,7 @@ function OffscreenWorkerContent() {
       sessionStorage.removeItem(flowKey);
 
       // Exchange code for access token
-      const tokenRes = await fetch('/api/auth/token', {
+      const tokenRes = await fetch('/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
