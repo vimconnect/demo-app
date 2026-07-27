@@ -89,9 +89,6 @@ function AppPageContent() {
   const contextUnsubscribeRefs = useRef<Map<string, () => void>>(new Map());
   const [eventPreviews, setEventPreviews] = useState<EventPreview[]>([]);
   const [contextChanges, setContextChanges] = useState<ContextChange[]>([]);
-  // Patient currently in EHR context — used to auto-fill API Reads id inputs so
-  // the read ops run against the detected patient without manual entry.
-  const [contextPatientId, setContextPatientId] = useState<string | null>(null);
 
   // Updaters (Write to EHR)
   const [activeUpdaters, setActiveUpdaters] = useState<
@@ -115,8 +112,10 @@ function AppPageContent() {
   const [cptCode, setCptCode] = useState('[{"code":"77770"},{"code":"01234"}]');
 
   // API Reads (SDK ehr.api.* getById/search) state.
-  // Per-operation parameter inputs, keyed by `${sdkNamespace}.${sdkMethod}.${paramName}`
-  // (and `.query` for search ops). Latest response per op, keyed by `${ns}.${method}`.
+  // Per-operation search inputs, keyed by `${sdkNamespace}.${sdkMethod}.<field>`
+  // where <field> is `query`, `cursor`, or `filters.${paramName}`. getById ops
+  // take no inputs (id resolved from context). Latest response per op, keyed by
+  // `${ns}.${method}`.
   const [readOpInputs, setReadOpInputs] = useState<Record<string, string>>({});
   const [readOpResults, setReadOpResults] = useState<Record<string, string>>(
     {},
@@ -148,9 +147,6 @@ function AppPageContent() {
   const [appStateLog, setAppStateLog] = useState<AppStateLogEntry[]>([]);
 
   const appStateUnsubRef = useRef<(() => void) | null>(null);
-  // Latest patient id seen per patient-context key, so closing one context
-  // clears the id only when no other context still holds a patient.
-  const patientIdByContextRef = useRef<Map<string, string | null>>(new Map());
 
   // Worker App round-trip demo (workerState + appEvents)
   const [workerData, setWorkerData] = useState<DemoWorkerData | null>(null);
@@ -251,47 +247,6 @@ function AppPageContent() {
         `Manifest loaded: ${sdkManifest.supportedEvents?.length || 0} events, ${sdkManifest.supportedContexts?.length || 0} contexts`,
         "info",
       );
-
-      // Always-on subscription to every supported context so API Reads can
-      // default its id inputs to the patient currently in the EHR. The context
-      // payload carries the entity under `.fields` (ContextData), so a patient
-      // id is fields.identifiers.id. We subscribe to all contexts (not just
-      // entityType 'patient') because patient info can ride along other events,
-      // and extract the id defensively across a couple of known shapes.
-      const allContextKeys = (sdkManifest.supportedContexts ?? []).map(
-        (ctx: any) => ctx.contextKey,
-      );
-      for (const contextKey of new Set(allContextKeys)) {
-        try {
-          sdk.ehr.context.onChange(
-            contextKey as ContextKey,
-            (_prev: any, current: any) => {
-              // Only patient-type contexts carry a patient id; ignore others
-              // (e.g. encounter_open:encounter carries an encounter id).
-              if (current && current.type !== "patient") return;
-              // Patient id sits at the top level (current.id / identifier.id).
-              // `current` is undefined when the patient leaves context (chart
-              // closed) → id becomes null, clearing this context's entry.
-              const id =
-                current?.id ??
-                current?.identifier?.id ??
-                current?.fields?.identifiers?.id ??
-                null;
-              patientIdByContextRef.current.set(
-                contextKey,
-                id != null ? String(id) : null,
-              );
-              // Reflect the first context that still holds a patient, else null.
-              const active =
-                [...patientIdByContextRef.current.values()].find((v) => v) ??
-                null;
-              setContextPatientId(active);
-            },
-          );
-        } catch {
-          // Context not subscribable in this session — skip silently.
-        }
-      }
 
       // ── Worker App round-trip demo ──────────────────────────────────────────
       // Subscribe to the mock state the Worker App writes (subscribe-and-sync:
@@ -827,9 +782,13 @@ function AppPageContent() {
   // SDK API read — catalog-based getById/search operations (non-disruptive, so
   // no permission lifecycle). Data-driven from manifest.operations, so this lists
   // whatever read ops the active EHR's collection exposes (e.g. patient.getPatient,
-  // patient.getInsurances, patient.getProblems). getById ops send the ids declared
-  // in metadata.idParameterNames; ops with zero id params ("Parameters: 0" in
-  // Studio) resolve the entity from the current EHR context, so we send {}.
+  // patient.getInsurances, patient.getProblems).
+  //
+  // getById ops take NO inputs — the entity id (patientId/encounterId) is resolved
+  // from the live EHR context by core-sdk, so passing an explicit id is deprecated;
+  // we send {}. search ops take an optional typed `input`: `query` (when
+  // metadata.supportsQuery), `filters` keyed by metadata.filterFields, and `cursor`
+  // (when metadata.paginated) — each included only when the user supplied a value.
   async function executeReadOperation(op: any) {
     if (!vimSDK) return;
     const opKey = `${op.sdkNamespace}.${op.sdkMethod}`;
@@ -842,19 +801,26 @@ function AppPageContent() {
     // Build the argument object from the per-op inputs.
     let callArg: any;
     if (op.operationType === "search") {
-      callArg = { query: readOpInputs[`${opKey}.query`]?.trim() || undefined };
-    } else {
-      const idParams: string[] = op.metadata?.idParameterNames ?? [];
-      const ids: Record<string, string> = {};
-      for (const p of idParams) {
-        // Explicit input wins; otherwise fall back to the in-context patient id
-        // for patient-namespace ops so the read runs against the detected patient.
-        const typed = readOpInputs[`${opKey}.${p}`]?.trim();
-        const fallback = op.sdkNamespace === "patient" ? contextPatientId : null;
-        const v = typed || fallback || "";
-        if (v) ids[p] = v;
+      const meta = op.metadata ?? {};
+      const input: Record<string, unknown> = {};
+      if (meta.supportsQuery) {
+        const query = readOpInputs[`${opKey}.query`]?.trim();
+        if (query) input.query = query;
       }
-      callArg = ids;
+      const filters: Record<string, string> = {};
+      for (const field of (meta.filterFields ?? []) as string[]) {
+        const v = readOpInputs[`${opKey}.filters.${field}`]?.trim();
+        if (v) filters[field] = v;
+      }
+      if (Object.keys(filters).length > 0) input.filters = filters;
+      if (meta.paginated) {
+        const cursor = readOpInputs[`${opKey}.cursor`]?.trim();
+        if (cursor) input.cursor = cursor;
+      }
+      callArg = input;
+    } else {
+      // getById — id resolved from live context; send no id params.
+      callArg = {};
     }
 
     setReadOpRunning((prev) => ({ ...prev, [opKey]: true }));
@@ -2061,10 +2027,19 @@ function AppPageContent() {
             ) : (
               readOps.map((op: any) => {
                 const opKey = `${op.sdkNamespace}.${op.sdkMethod}`;
-                const idParams: string[] =
-                  op.operationType === "getById"
-                    ? (op.metadata?.idParameterNames ?? [])
+                const meta = op.metadata ?? {};
+                // search inputs, all optional and data-driven from the manifest:
+                // a query box (supportsQuery), one box per filter paramName, and a
+                // cursor box (paginated). getById ops expose no inputs — the id is
+                // resolved from live context.
+                const showQuery =
+                  op.operationType === "search" && !!meta.supportsQuery;
+                const filterFields: string[] =
+                  op.operationType === "search"
+                    ? (meta.filterFields ?? [])
                     : [];
+                const showCursor =
+                  op.operationType === "search" && !!meta.paginated;
                 const result = readOpResults[opKey];
                 return (
                   <div className="updater-card" key={opKey}>
@@ -2099,56 +2074,11 @@ function AppPageContent() {
                       {op.sdkSignature ?? `Catalog entry: ${op.catalogEntryId}`}
                     </div>
 
-                    {/* getById id parameters — prefilled with the patient in
-                        context, but editable so any id can be queried. */}
-                    {idParams.map((param) => {
-                      const key = `${opKey}.${param}`;
-                      const ctxDefault =
-                        op.sdkNamespace === "patient"
-                          ? (contextPatientId ?? "")
-                          : "";
-                      // Explicit input wins; otherwise show the context patient id.
-                      const value = readOpInputs[key] ?? ctxDefault;
-                      const showingContextDefault =
-                        ctxDefault !== "" && readOpInputs[key] === undefined;
-                      return (
-                        <div
-                          className="input-group"
-                          style={{ marginBottom: "var(--space-xs)" }}
-                          key={param}
-                        >
-                          <input
-                            type="text"
-                            value={value}
-                            onChange={(e) =>
-                              setReadOpInputs((prev) => ({
-                                ...prev,
-                                [key]: e.target.value,
-                              }))
-                            }
-                            placeholder={`${param} (required)`}
-                            className="input"
-                          />
-                          {showingContextDefault && (
-                            <div
-                              style={{
-                                marginTop: "2px",
-                                fontSize: "var(--text-xs)",
-                                color: "var(--color-text-muted)",
-                              }}
-                            >
-                              Auto-filled from patient in context — editable
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-
-                    {/* search query */}
-                    {op.operationType === "search" && (
+                    {/* search query — only when the op supports free-text query */}
+                    {showQuery && (
                       <div
                         className="input-group"
-                        style={{ marginBottom: "var(--space-sm)" }}
+                        style={{ marginBottom: "var(--space-xs)" }}
                       >
                         <input
                           type="text"
@@ -2159,7 +2089,53 @@ function AppPageContent() {
                               [`${opKey}.query`]: e.target.value,
                             }))
                           }
-                          placeholder="Search query (optional)"
+                          placeholder="query (optional)"
+                          className="input"
+                        />
+                      </div>
+                    )}
+
+                    {/* typed filters — one box per filter paramName in the schema */}
+                    {filterFields.map((field) => {
+                      const key = `${opKey}.filters.${field}`;
+                      return (
+                        <div
+                          className="input-group"
+                          style={{ marginBottom: "var(--space-xs)" }}
+                          key={field}
+                        >
+                          <input
+                            type="text"
+                            value={readOpInputs[key] ?? ""}
+                            onChange={(e) =>
+                              setReadOpInputs((prev) => ({
+                                ...prev,
+                                [key]: e.target.value,
+                              }))
+                            }
+                            placeholder={`filters.${field} (optional)`}
+                            className="input"
+                          />
+                        </div>
+                      );
+                    })}
+
+                    {/* cursor — pagination token for paginated searches */}
+                    {showCursor && (
+                      <div
+                        className="input-group"
+                        style={{ marginBottom: "var(--space-sm)" }}
+                      >
+                        <input
+                          type="text"
+                          value={readOpInputs[`${opKey}.cursor`] ?? ""}
+                          onChange={(e) =>
+                            setReadOpInputs((prev) => ({
+                              ...prev,
+                              [`${opKey}.cursor`]: e.target.value,
+                            }))
+                          }
+                          placeholder="cursor (optional — from a previous page's pagination.nextCursor)"
                           className="input"
                         />
                       </div>
