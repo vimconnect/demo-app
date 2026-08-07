@@ -148,19 +148,10 @@ function OffscreenWorkerContent() {
           (prev, curr, handle) => {
             if (curr == null) {
               console.log(`[offscreen/worker] Context cleared: ${contextKey}`);
-              // Remove patient info from workerState when context closes
-              sdk.workerState.remove(`patient_${contextKey}`);
               return;
             }
 
             console.log(`[offscreen/worker] Context changed: ${contextKey}`, curr?.fields);
-
-            // Write summary to workerState so the UI App can display it
-            sdk.workerState.write(`patient_${contextKey}`, {
-              id: curr?.id,
-              name: `${curr?.fields?.firstName ?? ''} ${curr?.fields?.lastName ?? ''}`.trim(),
-              dob: curr?.fields?.dateOfBirth ?? null,
-            });
 
             // Send a push notification if notify operation is available
             if (handle.hub != null) {
