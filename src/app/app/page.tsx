@@ -62,6 +62,28 @@ type ErrorDetail = {
 };
 
 /**
+ * Context keys we deliberately hide from the demo — TEMPORARY WORKAROUND.
+ *
+ * These are workflow-only events that our infra currently *also* emits as context
+ * variants, even though no EHR implementation populates their entity. Verified
+ * against the prod Official Collection (v24):
+ *   - order_select:order / order_sign:order — Surescripts orders, workflow-only.
+ *   - referral_save:referral — wired only in Practice Fusion, as a bare click on the
+ *     send-referral button with zero extractors; it mines no referral data, so the
+ *     context variant promises an entity that never arrives.
+ * (referral_start:referral is a genuine context event and stays visible.)
+ *
+ * Kept in sync with CONTEXT_EXCLUDED_EVENT_IDS in the app-sdk type generator, which
+ * drops these same keys from the generated SDK types. Remove both once the infra
+ * supports workflow-only events and stops emitting the context variants.
+ */
+const HIDDEN_CONTEXT_KEYS: ReadonlySet<string> = new Set([
+  "order_select:order",
+  "order_sign:order",
+  "referral_save:referral",
+]);
+
+/**
  * Main App Page Content - OAuth Callback + Full SDK Demo
  */
 function AppPageContent() {
@@ -178,8 +200,9 @@ function AppPageContent() {
       .map((e: any) => e.id)
       .filter(Boolean);
     const ctxKeys: string[] = (manifest.supportedContexts ?? [])
-      .map((c: any) => c.contextKey ?? c.key)
-      .filter(Boolean);
+      .map((c) => c.contextKey)
+      // Skip workflow-only events that shouldn't appear as context (see HIDDEN_CONTEXT_KEYS).
+      .filter((k) => !HIDDEN_CONTEXT_KEYS.has(k));
 
     eventIds.forEach((id) => subscribeToWorkflowEvent(id));
     const subscribedCtxKeys = ctxKeys.filter((k) => subscribeToContext(k));
@@ -1023,7 +1046,11 @@ function AppPageContent() {
   }
 
   const supportedEvents = manifest?.supportedEvents || [];
-  const supportedContexts = manifest?.supportedContexts || [];
+  // Hide workflow-only events that shouldn't appear as context (see HIDDEN_CONTEXT_KEYS).
+  // Filtering here keeps the section count and the rendered toggles in agreement.
+  const supportedContexts = (manifest?.supportedContexts || []).filter(
+    (ctx) => !HIDDEN_CONTEXT_KEYS.has(ctx.contextKey),
+  );
   const contextWriteback: Record<string, any> =
     manifest?.contextWriteback || {};
   // Flatten contextWriteback into a list for the UI
@@ -1238,18 +1265,17 @@ function AppPageContent() {
                       No context events available
                     </div>
                   ) : (
-                    supportedContexts.map((ctx: { key?: string; contextKey?: string; name?: string; workflowEventId?: string; entityType?: string }, idx: number) => {
-                      const contextKey =
-                        ctx.key ||
-                        ctx.contextKey ||
-                        (ctx.workflowEventId && ctx.entityType
-                          ? `${ctx.workflowEventId}:${ctx.entityType}`
-                          : `context-${idx}`);
-                      const displayName = ctx.name || contextKey;
+                    supportedContexts.map((ctx) => {
+                      const contextKey = ctx.contextKey;
 
                       return (
                         <div key={contextKey} className="event-item">
-                          <div className="event-name">{displayName}</div>
+                          {/* Label is the event:entity key itself (e.g. chart_open:patient) —
+                              that's what a developer subscribes to. Description, when present,
+                              is a hover tooltip. */}
+                          <div className="event-name" title={ctx.description}>
+                            {contextKey}
+                          </div>
                           <div
                             className="toggle-switch"
                             onClick={() => toggleContextEvent(contextKey)}
