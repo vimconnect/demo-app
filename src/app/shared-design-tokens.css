@@ -43,6 +43,11 @@
   --color-cyan-50: rgba(108, 205, 239, 0.5);
   --color-cyan-60: rgba(108, 205, 239, 0.6);
 
+  /* Blue Opacity Variants - Single source of truth (RGB 16,171,228) */
+  --color-blue-20: rgba(16, 171, 228, 0.20);
+  --color-blue-24: rgba(16, 171, 228, 0.24);
+  --color-blue-32: rgba(16, 171, 228, 0.32);
+
   /* Purple Opacity Variants - Single source of truth (RGB 176,181,255) */
   --color-purple-08: rgba(176, 181, 255, 0.08);
   --color-purple-12: rgba(176, 181, 255, 0.12);
@@ -73,6 +78,14 @@
   --color-bg-secondary: #061020;
   --color-bg-elevated: #0a1628;
   --color-bg-card: #0a1628;
+
+  /* Faintest surface step — inset notes, hovered rows, group/sub-section header
+     strips. Always a nudge AWAY from the page background of its own theme
+     (lighter in dark, darker in light), never a fixed near-white. That is the
+     difference from --glass-bg-*, which is white-translucent in BOTH themes and
+     so vanishes on a light surface; this stays a visible band in either. */
+  --color-bg-subtle: rgba(255, 255, 255, 0.04);
+  --color-bg-subtle-strong: rgba(255, 255, 255, 0.07);
 
   --color-border-light: rgba(255, 255, 255, 0.08);
   --color-border-medium: rgba(255, 255, 255, 0.12);
@@ -201,6 +214,9 @@ body.light-mode {
   --color-bg-secondary: #fafbfc;
   --color-bg-elevated: #f5f7f9;
   --color-bg-card: #ffffff;
+
+  --color-bg-subtle: #f6f8fa;
+  --color-bg-subtle-strong: #eef1f5;
 
   --color-border-light: rgba(0, 0, 0, 0.06);
   --color-border-medium: rgba(0, 0, 0, 0.10);

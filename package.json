@@ -26,22 +26,22 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@vimconnect/app-sdk": "0.4.53",
+    "@vimconnect/app-sdk": "0.4.56",
     "next": "^16.2.12",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/node": "^20.14.10",
-    "@types/react": "^19.2.8",
-    "@types/react-dom": "^19.2.3",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "^5.0.0",
     "jsdom": "^25.0.1",
-    "typescript": "^5.5.3",
-    "vitest": "^4.1.1"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "repository": {
     "type": "git",
