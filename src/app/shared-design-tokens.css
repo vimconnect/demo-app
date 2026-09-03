@@ -24,6 +24,11 @@
   /* High-contrast text on cyan-tinted surfaces */
   --color-cyan-text-strong: #0b7fa6;
 
+  /* Its amber counterpart. Required, not stylistic: on a warning-tinted surface
+     --color-warning reaches only 1.9:1 and --color-yellow 2.0:1, both far below
+     AA; this reaches 4.5:1. Never substitute the plain amber for body-size text. */
+  --color-warning-text-strong: #b45309;
+
   /* Theme-aware cyan for TEXT and thin accents: the bright brand cyan reads
      well on the dark canvas but drops below contrast on white, where light
      mode swaps in the strong variant. Fills/bars keep --color-cyan. */
